@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<projectSpec>
+    <applicability>
+        <when>
+            <context
+                deviceFamily="ARM"
+                deviceId="Cortex M.CC1310F128"
+            />
+        </when>
+    </applicability>
+
+
+    <project
+        title="RF EasyLink RX"
+        name="rfEasyLinkRx_CC1310_LAUNCHXL_nortos_gcc"
+        toolChain="GNU"
+        connection="TIXDS110_Connection.xml"
+        device="Cortex M.CC1310F128"
+        ignoreDefaultDeviceSettings="true"
+        ignoreDefaultCCSSettings="true"
+        products="com.ti.SIMPLELINK_CC13X0_SDK"
+        compilerBuildOptions="
+            -I${PROJECT_ROOT}
+            -DDeviceFamily_CC13X0
+            -DCCFG_FORCE_VDDR_HH=0
+            -I${COM_TI_SIMPLELINK_CC13X0_SDK_INSTALL_DIR}/source
+            -DSUPPORT_PHY_CUSTOM
+            -DSUPPORT_PHY_50KBPS2GFSK
+            -DSUPPORT_PHY_625BPSLRM
+            -DSUPPORT_PHY_5KBPSSLLR
+            -I${COM_TI_SIMPLELINK_CC13X0_SDK_INSTALL_DIR}/kernel/nortos
+            -I${COM_TI_SIMPLELINK_CC13X0_SDK_INSTALL_DIR}/kernel/nortos/posix
+            -mcpu=cortex-m3
+            -march=armv7-m
+            -mthumb
+            -mfloat-abi=soft
+            -ffunction-sections
+            -fdata-sections
+            -g
+            -gstrict-dwarf
+            -Wall
+            -I${CG_TOOL_ROOT}/arm-none-eabi/include/newlib-nano
+            -I${CG_TOOL_ROOT}/arm-none-eabi/include
+        "
+        compilerBuildOptions_c="-std=c99"
+        compilerBuildOptions_cpp="-std=c++11"
+        linkerBuildOptions="
+             -L${COM_TI_SIMPLELINK_CC13X0_SDK_INSTALL_DIR}/source
+             -l:ti/display/lib/display.am3g
+             -l:ti/grlib/lib/gcc/m3/grlib.a
+             -l:third_party/spiffs/lib/gcc/m3/spiffs_cc26xx.a
+             -l:ti/drivers/rf/lib/rf_multiMode_cc13x0.am3g
+             -l:ti/drivers/lib/drivers_cc13x0.am3g
+             -eresetISR
+             -L${COM_TI_SIMPLELINK_CC13X0_SDK_INSTALL_DIR}/kernel/nortos
+             -l:lib/nortos_cc13x0.am3g
+             -l:ti/devices/cc13x0/driverlib/bin/gcc/driverlib.lib
+             -march=armv7-m
+             -mthumb
+             -nostartfiles
+             -static
+             -Wl,--gc-sections
+             -L${CG_TOOL_ROOT}/arm-none-eabi/lib/thumb/v7-m
+             -L${CG_TOOL_ROOT}/arm-none-eabi/lib
+             -lgcc
+             -lc
+             -lm
+             -lnosys
+             --specs=nano.specs
+        "
+        preBuildStep="
+        "
+        postBuildStep="
+        "
+        description="An EasyLink receive example">
+
+        <property name="buildProfile" value="release"/>
+        <property name="isHybrid" value="true"/>
+        <group id="rfEasyLinkRx.SIMPLELINK_CC13X0_SDK.CC1310_LAUNCHXL.easylink.GCC"/>
+        <file path="../easylink/EasyLink.h" openOnCreation="false" excludeFromBuild="false" action="copy" targetDirectory="easylink">
+        </file>
+        <file path="../easylink/easylink_config.h" openOnCreation="false" excludeFromBuild="false" action="copy" targetDirectory="easylink">
+        </file>
+        <file path="../easylink/easylink_config.c" openOnCreation="false" excludeFromBuild="false" action="copy" targetDirectory="easylink">
+        </file>
+        <file path="../easylink/EasyLink_nortos.c" openOnCreation="false" excludeFromBuild="false" action="copy" targetDirectory="easylink">
+        </file>
+        <file path="../main_nortos.c" openOnCreation="false" excludeFromBuild="false" action="copy">
+        </file>
+        <file path="../smartrf_settings/smartrf_settings.c" openOnCreation="false" excludeFromBuild="false" action="copy" targetDirectory="smartrf_settings">
+        </file>
+        <file path="../smartrf_settings/smartrf_settings.h" openOnCreation="false" excludeFromBuild="false" action="copy" targetDirectory="smartrf_settings">
+        </file>
+        <file path="../smartrf_settings/smartrf_settings_predefined.c" openOnCreation="false" excludeFromBuild="false" action="copy" targetDirectory="smartrf_settings">
+        </file>
+        <file path="../smartrf_settings/smartrf_settings_predefined.h" openOnCreation="false" excludeFromBuild="false" action="copy" targetDirectory="smartrf_settings">
+        </file>
+        <file path="../README.md" openOnCreation="false" excludeFromBuild="false" action="copy">
+        </file>
+        <file path="../rfEasyLinkRx_nortos.c" openOnCreation="false" excludeFromBuild="false" action="copy">
+        </file>
+        <file path="../Board.h" openOnCreation="false" excludeFromBuild="false" action="copy">
+        </file>
+        <file path="${COM_TI_SIMPLELINK_CC13X0_SDK_INSTALL_DIR}/source/ti/boards/CC1310_LAUNCHXL/Board.html" openOnCreation="false" excludeFromBuild="false" action="link">
+        </file>
+        <file path="../CC1310_LAUNCHXL.c" openOnCreation="false" excludeFromBuild="false" action="copy">
+        </file>
+        <file path="../CC1310_LAUNCHXL.h" openOnCreation="false" excludeFromBuild="false" action="copy">
+        </file>
+        <file path="../CC1310_LAUNCHXL_fxns.c" openOnCreation="false" excludeFromBuild="false" action="copy">
+        </file>
+        <file path="../gcc/CC1310_LAUNCHXL_NoRTOS.lds" openOnCreation="false" excludeFromBuild="false" action="copy">
+        </file>
+        <file path="../ccfg.c" openOnCreation="false" excludeFromBuild="false" action="copy">
+        </file>
+    </project>
+</projectSpec>
+
