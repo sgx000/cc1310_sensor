@@ -4,12 +4,13 @@
  * Wzorzec: NIE init RF na starcie. Per event (button/heartbeat):
  *   - EasyLink_init + setFrequency
  *   - BATMON enable, pomiar, disable
- *   - EasyLink_transmit
+ *   - TX_REPEATS x transmit z CCA i timeoutem (redundancja, ten sam seq)
  *   - EasyLink_close (RF_close + reset state)
  *   - LED blink
  *   - powrot do standby
  * Miedzy zdarzeniami RF jest CALKOWICIE zamkniete - brak periodicznych
  * zegarow RF drivera (RAT sync, inactivity).
+ * Watchdog (stoi w standby) chroni przed zawieszeniem w fazach aktywnych.
  */
 #include "Board.h"
 #include <stdbool.h>
@@ -24,6 +25,7 @@
 #include <ti/drivers/dpl/HwiP.h>
 #include <ti/devices/DeviceFamily.h>
 #include DeviceFamily_constructPath(driverlib/aon_batmon.h)
+#include DeviceFamily_constructPath(driverlib/watchdog.h)
 
 #include "easylink/EasyLink.h"
 
@@ -39,9 +41,23 @@ extern EasyLink_Status EasyLink_close(void);
 #define WAKE_HEARTBEAT 3
 #define WAKE_BTN3      4
 
-#define LED_BLINK_LOOPS  1600000U
-#define DEBOUNCE_LOOPS    500000U
+#define DEBOUNCE_MS           40U   /* czas debounce kontaktronow (standby, nie busy-wait) */
 #define JITTER_MAX_MS        100U   /* anty-kolizja: losowy odstep 0..100 ms przed TX */
+#define TX_TIMEOUT_MS       1000U   /* max czekanie na callback TX/CCA, potem abort */
+#define TX_REPEATS             3U   /* ile razy wyslac te sama ramke (gateway deduplikuje po seq) */
+#define TX_REPEAT_GAP_MIN_MS  20U   /* losowy odstep miedzy powtorkami: MIN..MIN+RANGE ms */
+#define TX_REPEAT_GAP_RNG_MS  60U
+
+/* Watchdog: zegar 1.5 MHz (48MHz/32), liczy TYLKO gdy MCU aktywne (w standby
+ * stoi) -> chroni przed zawieszeniem w petlach aktywnych (RF, BATMON), a nie
+ * resetuje podczas normalnego spania. Reset po 2. timeoucie = max ~10 s. */
+#define WDT_RELOAD_TICKS  (1500000U * 5U)   /* ~5 s */
+static void wdtKick(void){ WatchdogIntClear(); WatchdogReloadSet(WDT_RELOAD_TICKS); }
+static void wdtInit(void){
+    WatchdogReloadSet(WDT_RELOAD_TICKS);
+    WatchdogResetEnable();
+    WatchdogEnable();
+}
 
 /* --- Mapowanie pinow na wlasnej plytce z modulem RF-CC1310 ---
  * 1 dioda na DIO6 (active-high: DIO6 -> R -> LED -> GND)
@@ -83,7 +99,6 @@ static uint8_t       lastBtn2      = 0;
 static uint8_t       lastBtn3      = 0;
 static uint8_t       nodeAddr      = 0x01;
 static uint8_t       chipId[4]     = {0,0,0,0};
-static bool          identityOk    = false;
 
 static ClockP_Struct hbClockStruct;
 static ClockP_Handle hbClock;
@@ -105,8 +120,6 @@ static uint32_t appRng(void){
     prngState = x ? x : 0xA5A5A5A5u;
     return prngState;
 }
-
-static void busy(uint32_t n){ volatile uint32_t k=n; while(k--) __asm__ volatile("nop"); }
 
 static void blinkClkCb(uintptr_t a){ (void)a; blinkDone = true; }
 static void txDoneCb(EasyLink_Status s){ (void)s; txDone = true; }
@@ -139,8 +152,26 @@ static uint16_t g_vbatMv = 0;
 static int8_t   g_tempC  = 0;
 static void readVbatAndTemp(void){
     AONBatMonEnable();
+    /* Rejestry BATMON sa w domenie AON - trzymaja wartosci i flagi UPD
+     * z POPRZEDNIEGO seansu (sprzed nawet 30 min). Najpierw zrzucamy stale
+     * flagi (clear-on-read), potem czekamy na SWIEZY pomiar obu wielkosci.
+     * Bez tego temp/vbat moglyby byc odczytem z poprzedniego cyklu. */
+    (void)AONBatMonNewBatteryMeasureReady();
+    (void)AONBatMonNewTempMeasureReady();
+    bool batRdy = false, tempRdy = false;
     uint32_t guard = 200000;
-    while(!AONBatMonNewBatteryMeasureReady() && guard){ guard--; }
+    while(guard && !(batRdy && tempRdy)){
+        if(!batRdy)  batRdy  = AONBatMonNewBatteryMeasureReady();
+        if(!tempRdy) tempRdy = AONBatMonNewTempMeasureReady();
+        guard--;
+    }
+    if(!(batRdy && tempRdy)){
+        /* pomiar nie doszedl do skutku - nie wysylaj smieci, 0 = marker bledu */
+        AONBatMonDisable();
+        g_vbatMv = 0;
+        g_tempC  = 0;
+        return;
+    }
     uint32_t raw = AONBatMonBatteryVoltageGet();
     int32_t  t   = AONBatMonTemperatureGetDegC();
     AONBatMonDisable();
@@ -189,9 +220,41 @@ static void deriveNodeIdentityFromIeee(void){
     nodeAddr=a;
 }
 
-/* Pelny cykl: init RF -> pobierz tozsamosc gdy pierwszy raz -> wyslij -> zamknij RF */
+/* Sygnalizacja awarii RF: dluzsze swiecenie LED (~250 ms, w standby) */
+static void errorBlink(void){
+    PIN_setOutputValue(pinHandle,APP_PIN_LED,1);
+    lpWaitTicks(250u * ticksPerMs);
+    PIN_setOutputValue(pinHandle,APP_PIN_LED,0);
+}
+
+/* Jedna proba TX z CCA i twardym timeoutem. Gdy callback nie przyjdzie w
+ * TX_TIMEOUT_MS (zawieszone RF / wiecznie zajety kanal) -> EasyLink_abort,
+ * ktory dowiezie callback. Watchdog jest ostatnia linia obrony. */
+static void txOnceWithTimeout(EasyLink_TxPacket *tx){
+    txDone   = false;
+    blinkDone = false;
+    ClockP_stop(blinkClk);
+    ClockP_setTimeout(blinkClk, TX_TIMEOUT_MS * ticksPerMs);
+    ClockP_start(blinkClk);
+    if(EasyLink_transmitCcaAsync(tx, txDoneCb) == EasyLink_Status_Success){
+        while(!txDone && !blinkDone){ Power_idleFunc(); }
+        if(!txDone){
+            EasyLink_abort();                   /* wywola txDoneCb(Aborted) */
+            uint32_t guard = 200000;
+            while(!txDone && guard){ guard--; }
+        }
+    } else {
+        /* gdyby CCA nie wystartowala (np. brak RNG) - nadaj na slepo */
+        EasyLink_transmit(tx);
+    }
+    ClockP_stop(blinkClk);
+}
+
+/* Pelny cykl: init RF -> wyslij TX_REPEATS razy -> zamknij RF */
 static void txWithFullRfCycle(uint8_t reason)
 {
+    wdtKick();
+
     /* Anty-kolizja #1: losowy odstep 0..JITTER_MAX_MS w standby, RF jeszcze
      * wylaczone (tanio). Dwa wezly wybudzone razem rozjada sie w czasie. */
     lpWaitTicks( (appRng() % (JITTER_MAX_MS + 1u)) * ticksPerMs );
@@ -205,12 +268,14 @@ static void txWithFullRfCycle(uint8_t reason)
     elp.ui32ModType = EasyLink_Phy_Custom;
     elp.pGrnFxn     = appRng;             /* RNG wymagany przez CCA (backoff) */
     if(EasyLink_init(&elp) != EasyLink_Status_Success){
-        /* awaria - migaj LED2 */
-        PIN_setOutputValue(pinHandle,APP_PIN_LED,1); busy(LED_BLINK_LOOPS*2);
-        PIN_setOutputValue(pinHandle,APP_PIN_LED,0);
+        errorBlink();
         return;
     }
-    EasyLink_setFrequency(RF_FREQUENCY_HZ);
+    if(EasyLink_setFrequency(RF_FREQUENCY_HZ) != EasyLink_Status_Success){
+        EasyLink_close();
+        errorBlink();
+        return;
+    }
 
     EasyLink_TxPacket tx; memset(&tx,0,sizeof(tx));
     tx.dstAddr[0]=GATEWAY_ADDR; tx.absTime=0; tx.len=14;
@@ -224,18 +289,21 @@ static void txWithFullRfCycle(uint8_t reason)
     tx.payload[13]=(uint8_t)g_tempC;         /* temp ukladu, degC ze znakiem */
     seqNumber++;
 
-    /* Anty-kolizja #2: CCA (listen-before-talk) - slucha kanalu i robi backoff,
-     * gdy zajety. Czekamy na callback (RF aktywne w tym oknie, bez standby). */
-    txDone = false;
-    if(EasyLink_transmitCcaAsync(&tx, txDoneCb) == EasyLink_Status_Success){
-        while(!txDone){ Power_idleFunc(); }
-    } else {
-        /* gdyby CCA nie wystartowala (np. brak RNG) - nadaj na slepo */
-        EasyLink_transmit(&tx);
+    /* Anty-kolizja #2: CCA per proba. Redundancja: ta sama ramka (ten sam seq)
+     * leci TX_REPEATS razy z losowym odstepem - gateway deduplikuje po
+     * (nodeAddr, seq), a zgubienie pojedynczej ramki nie gubi zdarzenia. */
+    for(uint8_t i=0; i<TX_REPEATS; i++){
+        if(i){
+            lpWaitTicks( (TX_REPEAT_GAP_MIN_MS
+                          + (appRng() % (TX_REPEAT_GAP_RNG_MS + 1u))) * ticksPerMs );
+        }
+        wdtKick();
+        txOnceWithTimeout(&tx);
     }
 
     /* Pelne zamkniecie RF - kasuje wewnetrzne zegary RF drivera */
     EasyLink_close();
+    wdtKick();
 }
 
 void *mainThread(void *arg0)
@@ -256,12 +324,15 @@ void *mainThread(void *arg0)
     hbClock  = ClockP_construct(&hbClockStruct,  hbClockCb,  hbTicks,    &cp);
     blinkClk = ClockP_construct(&blinkClkStruct, blinkClkCb, blinkTicks, &cp);
 
+    /* Watchdog: liczy tylko gdy MCU aktywne (w standby stoi), wiec chroni
+     * przed zawieszeniem bez budzenia ukladu. Kick przy kazdym wybudzeniu. */
+    wdtInit();
+
     /* Tozsamosc + seed PRNG raz na starcie (getIeeeAddr czyta FCFG, nie wymaga RF).
      * Dzieki temu juz pierwszy jitter (power-on TX) jest per-wezel. */
     deriveNodeIdentityFromIeee();
-    identityOk = true;
 
-    for(int i=0;i<3;i++){ blinkBothLeds(); busy(1500000U); }
+    for(int i=0;i<3;i++){ blinkBothLeds(); lpWaitTicks(150u * ticksPerMs); }
 
     PIN_registerIntCb(pinHandle, buttonCb);
 
@@ -289,7 +360,10 @@ void *mainThread(void *arg0)
         heartbeatDue = false;
         HwiP_restore(key);
 
-        busy(DEBOUNCE_LOOPS);
+        wdtKick();
+
+        /* Debounce w standby (RTC budzi), nie busy-wait na NOP-ach */
+        lpWaitTicks(DEBOUNCE_MS * ticksPerMs);
         uint8_t b1 = readBtn(APP_PIN_BTN1);
         uint8_t b2 = readBtn(APP_PIN_BTN2);
         uint8_t b3 = readBtn(APP_PIN_BTN3);
@@ -301,6 +375,16 @@ void *mainThread(void *arg0)
         PIN_clrPendInterrupt(pinHandle, APP_PIN_BTN1);
         PIN_clrPendInterrupt(pinHandle, APP_PIN_BTN2);
         PIN_clrPendInterrupt(pinHandle, APP_PIN_BTN3);
+
+        /* Anty-race: zmiana stanu miedzy readBtn() a clrPendInterrupt()
+         * skasowalaby przerwanie i zgubila zdarzenie (IRQ uzbrojone na
+         * zbocze, ktore juz minelo). Re-check po wyczyszczeniu: gdy stan
+         * znow odjechal, wymus kolejny obieg petli. */
+        if( readBtn(APP_PIN_BTN1) != lastBtn1 ||
+            readBtn(APP_PIN_BTN2) != lastBtn2 ||
+            readBtn(APP_PIN_BTN3) != lastBtn3 ){
+            wakeFlag = true;
+        }
 
         bool didTx = false;
         if(reason != 0xFF){ txWithFullRfCycle(reason); blinkBothLeds(); didTx = true; }
