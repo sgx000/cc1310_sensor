@@ -5,15 +5,26 @@ NoRTOS + EasyLink + standby (Power_idleFunc).
 
 ## Co robi
 
-- Po starcie: 3× mignięcie obu LED-ów + power-on TX
-- Każda zmiana stanu BTN-1 (DIO13) lub BTN-2 (DIO14) wybudza chip
-  ze standby, wysyła ramkę do gateway-a z powodem wybudzenia,
-  mruga obiema diodami, wraca do standby
+- Po starcie: 3× mignięcie LED (DIO6) + power-on TX
+- Każda zmiana stanu kontaktronu BTN-1 (DIO7), BTN-2 (DIO8) lub
+  BTN-3 (DIO9) wybudza chip ze standby, wysyła ramkę do gateway-a
+  z powodem wybudzenia, mruga diodą, wraca do standby
 - Raz na 30 min bez aktywności: heartbeat (RTC wybudza)
 - Pomiędzy zdarzeniami: deep standby
 
+Niezawodność:
+
+- Każda ramka wysyłana 3× z losowym odstępem 20–80 ms (ten sam seq —
+  gateway deduplikuje po `(node addr, seq)`); pojedyncza kolizja nie
+  gubi zdarzenia
+- CCA (listen-before-talk) + losowy jitter 0–100 ms przed TX
+- Timeout 1 s na każdą próbę TX (`EasyLink_abort` gdy callback nie
+  przyjdzie) + watchdog ~10 s jako ostatnia linia obrony (watchdog
+  stoi w standby, więc nie budzi układu)
+
 Adres węzła jest wyliczany z fabrycznego IEEE ID chipa (unikalny per
-sztuka). Napięcie zasilania mierzone przez AON BatMon przy każdej ramce.
+sztuka). Napięcie zasilania i temperatura układu mierzone przez
+AON BatMon przy każdej ramce (0 = pomiar nieudany).
 
 ## Wymagania — patrz README gatewaya
 
@@ -37,16 +48,18 @@ make COM_TI_SIMPLELINK_CC13X0_SDK_INSTALL_DIR=/scieżka/do/simplelink_cc13x0_sdk
 
 Wynik: `rfEasyLinkTx.out`. Konwersja do hex jak w gatewayu.
 
-## Format ramki (12 bajtów)
+## Format ramki (14 bajtów)
 
 ```
 [0]      node addr  - 1 bajt, wyliczony z IEEE chip ID
-[1]      reason     - 0=poweron, 1=btn1, 2=btn2, 3=heartbeat
-[2]      btn1 state - 0=zwolniony, 1=wcisniety
+[1]      reason     - 0=poweron, 1=btn1, 2=btn2, 3=heartbeat, 4=btn3
+[2]      btn1 state - 0=zwolniony, 1=wcisniety (kontaktron zwarty do GND)
 [3]      btn2 state
 [4..7]   chip ID    - 4 bajty z fabrycznego IEEE
-[8][9]   frame seq  - hi/lo
-[10][11] vbat_mv    - napiecie zasilania w miliwoltach
+[8][9]   frame seq  - hi/lo (powtórki ramki mają ten sam seq!)
+[10][11] vbat_mv    - napiecie zasilania w miliwoltach (0 = pomiar nieudany)
+[12]     btn3 state
+[13]     temp       - temperatura ukladu, degC ze znakiem (int8)
 ```
 
 Adres docelowy ramki w polu `dstAddr` to `0xAA` — gateway ma włączony
